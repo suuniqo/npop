@@ -4,6 +4,9 @@
 module Query
   ( Query(..)
   , QueryErr(..)
+  , MsgNo
+  , toIdx
+  , msgEnum
   , buildQuery
   ) where
 
@@ -17,14 +20,23 @@ data Query
   = User ByteString
   | Pass ByteString
   | Stat
-  | List (Maybe Word)
-  | Uidl (Maybe Word) 
-  | Retr Word
-  | Dele Word
+  | List (Maybe MsgNo)
+  | Uidl (Maybe MsgNo) 
+  | Retr MsgNo
+  | Dele MsgNo
   | Noop
   | Rset
   | Quit
   deriving Show
+
+newtype MsgNo = MsgNo Int
+  deriving (Show, Eq, Ord)
+
+toIdx :: MsgNo -> Int
+toIdx (MsgNo num) = num - 1
+
+msgEnum :: [MsgNo]
+msgEnum = MsgNo <$> [1..]
 
 data QueryErr
   = Client ClientErr
@@ -40,30 +52,30 @@ instance Show QueryErr where
     Malformed  -> "malformed command"
 
 maxWord :: Integer
-maxWord = toInteger (maxBound :: Word)
+maxWord = toInteger (maxBound :: Int)
 
-readWord :: BS.ByteString -> Maybe Word
-readWord bs = do
+readNo :: BS.ByteString -> Maybe MsgNo
+readNo bs = do
     (n, rest) <- BS.readInteger bs
 
     if BS.null rest
-       && n >= 0
+       && n > 0
        && n <= maxWord
-    then Just (fromInteger n)
+    then Just (MsgNo $ fromInteger n)
     else Nothing
 
 parseVoid :: Query -> [ByteString] -> Either QueryErr Query
 parseVoid q [] = Right q
 parseVoid _ _  = Left Malformed
 
-parseWord :: (Word -> Query) -> [ByteString] -> Either QueryErr Query
-parseWord q [arg] = maybe (Left Malformed) (Right . q) (readWord arg)
-parseWord _  _    = Left Malformed
+parseNo :: (MsgNo -> Query) -> [ByteString] -> Either QueryErr Query
+parseNo q [arg] = maybe (Left Malformed) (Right . q) (readNo arg)
+parseNo _  _    = Left Malformed
 
-parseMaybeWord :: (Maybe Word -> Query) -> [ByteString] -> Either QueryErr Query
-parseMaybeWord q []    = Right (q Nothing)
-parseMaybeWord q [arg] = parseWord (q . Just) [arg]
-parseMaybeWord _  _    = Left Malformed
+parseMaybeNo :: (Maybe MsgNo -> Query) -> [ByteString] -> Either QueryErr Query
+parseMaybeNo q []    = Right (q Nothing)
+parseMaybeNo q [arg] = parseNo (q . Just) [arg]
+parseMaybeNo _  _    = Left Malformed
 
 parseString :: (ByteString -> Query) -> [ByteString] -> Either QueryErr Query
 parseString q [arg] = Right (q arg)
@@ -80,10 +92,10 @@ parsers :: [(ByteString, [ByteString] -> Either QueryErr Query)]
 parsers = 
   [ ("USER", parseString User)
   , ("PASS", parseString Pass)
-  , ("LIST", parseMaybeWord List)
-  , ("UIDL", parseMaybeWord Uidl)
-  , ("RETR", parseWord Retr)
-  , ("DELE", parseWord Dele)
+  , ("LIST", parseMaybeNo List)
+  , ("UIDL", parseMaybeNo Uidl)
+  , ("RETR", parseNo Retr)
+  , ("DELE", parseNo Dele)
   , ("STAT", parseVoid Stat)
   , ("NOOP", parseVoid Noop)
   , ("RSET", parseVoid Rset)

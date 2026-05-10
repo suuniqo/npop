@@ -17,8 +17,10 @@ import Control.Exception (bracket, catch, throwIO)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import Data.Char (isAlphaNum)
-import Data.List (stripPrefix, partition)
+import Data.List (stripPrefix)
 import Data.Set (Set)
+import Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Time.Clock.POSIX (POSIXTime)
 import GHC.IO.Exception (IOErrorType (AlreadyExists, NoSuchThing))
@@ -53,7 +55,7 @@ newtype UID = UID { unUID :: String }
 
 data Message = Message
   { msgPath  :: !FilePath
-  , msgSize  :: !FileOffset
+  , msgSize  :: !Integer
   , msgTime  :: !POSIXTime
   , msgFlags :: !(Set Flag)
   , msgUid   :: !UID
@@ -190,7 +192,7 @@ buildMessage (path, size) = do
   time  <- buildTime base
   uid   <- buildUid base
 
-  pure $ Message path size time flags uid
+  pure $ Message path (fromIntegral size) time flags uid
 
 -- Maildir Dumping
 
@@ -239,19 +241,15 @@ withLock user action =
         NoSuchThing   -> pure $ Left NoSuchUser
         _             -> throwIO err
 
-fetchMailbox :: Lock -> Username -> IO (Either StorageErr [Message])
+fetchMailbox :: Lock -> Username -> IO (Either StorageErr (Seq Message))
 fetchMailbox _ user = do
   maybeMsgs <- mapM buildMessage <$> maildirFiles user
 
   pure $ case maybeMsgs of
-    Nothing -> Left CorruptMail
-    Just ms -> Right ms
+    Nothing   -> Left CorruptMail
+    Just msgs -> Right (Seq.fromList msgs)
 
-updateMailbox :: Lock -> Username -> [Message] -> IO ()
-updateMailbox _ user msgs =
-  do
-    mapM_ (moveMessage root) keep
-    mapM_ deleMessage trash
-  where
-    root = userRoot user
-    (trash, keep) = partition (flagged Trashed) msgs 
+updateMailbox :: Lock -> Username -> [Message] -> [Message] -> IO ()
+updateMailbox _ user trash keep = do
+  mapM_ (moveMessage (userRoot user)) keep
+  mapM_ deleMessage trash

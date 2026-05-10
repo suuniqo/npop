@@ -58,6 +58,7 @@ library
     hs-source-dirs: src
     exposed-modules:
         Config
+        Types
         Error
         Log
         Server
