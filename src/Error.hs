@@ -4,6 +4,7 @@ module Error
   , annotate
   , classify
   , noCandidatesErr
+  , corruptMailErr
   ) where
 
 import Control.Exception
@@ -33,6 +34,8 @@ data Oper
   | OpListDir FilePath
   | OpStatFile FilePath
   | OpMove FilePath FilePath
+  | OpRead
+  | OpUser
 
 instance Show Oper where
   show op = case op of
@@ -52,6 +55,8 @@ instance Show Oper where
     OpListDir path  -> "failed when listing directory " ++ path
     OpStatFile path -> "failed to stat file " ++ path
     OpMove src dst  -> "failed to move file from " ++ src ++ " to " ++ dst
+    OpRead          -> "failed when reading file"
+    OpUser          -> ""
 
 data SysErr = SysErr
   { seOper :: Oper
@@ -73,6 +78,12 @@ classify err = ioeGetErrorType (seExcp err)
 
 noCandidatesErr :: SysErr
 noCandidatesErr = SysErr
-  { seOper = OpAddrInfo
+  { seOper = OpUser
   , seExcp = userError "no addrinfo candidates found"
+  }
+
+corruptMailErr :: SysErr
+corruptMailErr = SysErr
+  { seOper = OpUser
+  , seExcp = userError "inconsistent mail format found"
   }

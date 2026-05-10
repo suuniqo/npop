@@ -4,9 +4,6 @@
 module Query
   ( Query(..)
   , QueryErr(..)
-  , MsgNo
-  , toIdx
-  , msgEnum
   , buildQuery
   ) where
 
@@ -15,6 +12,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS
 
 import Server (ClientErr(..))
+import Types (MsgNo, readMsgNo)
 
 data Query
   = User ByteString
@@ -29,15 +27,6 @@ data Query
   | Quit
   deriving Show
 
-newtype MsgNo = MsgNo Int
-  deriving (Show, Eq, Ord)
-
-toIdx :: MsgNo -> Int
-toIdx (MsgNo num) = num - 1
-
-msgEnum :: [MsgNo]
-msgEnum = MsgNo <$> [1..]
-
 data QueryErr
   = Client ClientErr
   | Empty
@@ -51,31 +40,18 @@ instance Show QueryErr where
     Unknown    -> "unknown command"
     Malformed  -> "malformed command"
 
-maxWord :: Integer
-maxWord = toInteger (maxBound :: Int)
-
-readNo :: BS.ByteString -> Maybe MsgNo
-readNo bs = do
-    (n, rest) <- BS.readInteger bs
-
-    if BS.null rest
-       && n > 0
-       && n <= maxWord
-    then Just (MsgNo $ fromInteger n)
-    else Nothing
-
 parseVoid :: Query -> [ByteString] -> Either QueryErr Query
 parseVoid q [] = Right q
 parseVoid _ _  = Left Malformed
 
-parseNo :: (MsgNo -> Query) -> [ByteString] -> Either QueryErr Query
-parseNo q [arg] = maybe (Left Malformed) (Right . q) (readNo arg)
-parseNo _  _    = Left Malformed
+parseMsgNo :: (MsgNo -> Query) -> [ByteString] -> Either QueryErr Query
+parseMsgNo q [arg] = maybe (Left Malformed) (Right . q) (readMsgNo arg)
+parseMsgNo _  _    = Left Malformed
 
-parseMaybeNo :: (Maybe MsgNo -> Query) -> [ByteString] -> Either QueryErr Query
-parseMaybeNo q []    = Right (q Nothing)
-parseMaybeNo q [arg] = parseNo (q . Just) [arg]
-parseMaybeNo _  _    = Left Malformed
+parseOptMsgNo :: (Maybe MsgNo -> Query) -> [ByteString] -> Either QueryErr Query
+parseOptMsgNo q []    = Right (q Nothing)
+parseOptMsgNo q [arg] = parseMsgNo (q . Just) [arg]
+parseOptMsgNo _  _    = Left Malformed
 
 parseString :: (ByteString -> Query) -> [ByteString] -> Either QueryErr Query
 parseString q [arg] = Right (q arg)
@@ -92,10 +68,10 @@ parsers :: [(ByteString, [ByteString] -> Either QueryErr Query)]
 parsers = 
   [ ("USER", parseString User)
   , ("PASS", parseString Pass)
-  , ("LIST", parseMaybeNo List)
-  , ("UIDL", parseMaybeNo Uidl)
-  , ("RETR", parseNo Retr)
-  , ("DELE", parseNo Dele)
+  , ("LIST", parseOptMsgNo List)
+  , ("UIDL", parseOptMsgNo Uidl)
+  , ("RETR", parseMsgNo Retr)
+  , ("DELE", parseMsgNo Dele)
   , ("STAT", parseVoid Stat)
   , ("NOOP", parseVoid Noop)
   , ("RSET", parseVoid Rset)

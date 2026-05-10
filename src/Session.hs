@@ -3,7 +3,23 @@
 
 module Session
   ( SessionErr (..)
-  , Reply
+  , Reply (..)
+  , PassReply (..)
+  , StatReply (..)
+  , ListEntry (..)
+  , ListReply (..)
+  , RetrReply (..)
+  , DeleReply (..)
+  , RsetReply (..)
+  , UidlEntry (..)
+  , UidlReply (..)
+  , QuitReply (..)
+  , Phase
+  , Auth
+  , Authed
+  , Trans
+  , Update
+  , Transition (..)
   , startSession
   , processQuery
   , withAuth
@@ -16,14 +32,11 @@ import qualified Data.Set as Set
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 
-import Query (Query (..), QueryErr, MsgNo, toIdx, msgEnum)
+import Query (Query (..), QueryErr (Client))
 
 import Storage
   ( Message (..)
-  , Username
-  , userValidate
   , StorageErr
-  , UID
   , withLock
   , fetchMailbox
   , Lock
@@ -31,59 +44,106 @@ import Storage
   , updateMailbox
   )
 import Data.ByteString (ByteString)
-import Error (SysErr)
 import Data.Maybe (isNothing)
+import Error (SysErr)
+import Server (ClientErr(Disconn, Timeout))
+
+import Types
+  ( UID
+  , Username, userValidate
+  , MsgNo, toIdx, msgEnum
+  )
 
 -- Data
+
+data PassReply = PassReply
+  { passUser  :: Username
+  , passCount :: Int
+  , passSize  :: Integer
+  }
+  deriving Show
 
 data StatReply = StatReply
   { statCount :: Int
   , statSize  :: Integer
   }
+  deriving Show
 
 data ListEntry = ListEntry
   { listId   :: MsgNo
   , listSize :: Integer
   }
+  deriving Show
 
 data ListReply
   = ListOne ListEntry
   | ListAll [ListEntry]
+  deriving Show
 
 data UidlEntry = UidlEntry
   { uidlId  :: MsgNo
   , uidlUID :: UID
   }
+  deriving Show
 
 data UidlReply
   = UidlOne UidlEntry
   | UidlAll [UidlEntry]
+  deriving Show
 
-data QuitReply = QuitReply
-  { quitUser :: Maybe Username 
-  , quitLeft :: Maybe Int 
+data RetrReply = RetrReply
+  { retrPath :: FilePath
+  , retrSize :: Integer
   }
+  deriving Show
 
-data Reply
-  = RepUser Username
-  | RepPass Username
-  | RepStat StatReply
-  | RepList ListReply
-  | RepRetr FilePath
-  | RepDele MsgNo
-  | RepRset Int
-  | RepNoop
-  | RepUidl UidlReply
-  | RepQuit QuitReply
+newtype DeleReply = DeleReply { deleId :: MsgNo }
+  deriving Show
+
+data RsetReply = RsetReply
+  { rsetCount :: Int
+  , rsetSize  :: Integer
+  }
+  deriving Show
+
+newtype QuitReply = QuitReply { quitCount :: Maybe Int }
+  deriving Show
 
 data SessionErr
-  = Sys SysErr          -- TODO: handle correctly
+  = Sys SysErr  -- TODO: handle correctly
   | Query QueryErr
   | Storage StorageErr
   | InvalidPhase
+  | InvalidUser
   | UserFirst
   | AlreadyDele
   | NoSuchMsg
+
+instance Show SessionErr where
+  show err = case err of
+    Sys     _    -> "internal failure"
+    Query   err' -> show err'
+    Storage err' -> show err'
+    InvalidPhase -> "command not available in this state"
+    InvalidUser  -> "invalid username"
+    UserFirst    -> "PASS requires USER first"
+    AlreadyDele  -> "message already deleted"
+    NoSuchMsg    -> "no such message"
+
+data Reply
+  = RepHelo
+  | RepUser
+  | RepPass PassReply
+  | RepStat StatReply
+  | RepList ListReply
+  | RepRetr RetrReply
+  | RepDele DeleReply
+  | RepRset RsetReply
+  | RepNoop
+  | RepUidl UidlReply
+  | RepQuit QuitReply
+  | RepErr SessionErr
+  deriving Show
 
 -- Phases
 
@@ -99,11 +159,11 @@ data Phase s where
   UpdatePhase :: Username -> Lock -> Seq Message -> Set MsgNo -> Phase Update
 
 data Transition s
-  = Stay (Phase s)
+  = Stay (Phase s, Reply)
   | Next (Phase (Next s))
-  | Term
+  | Term (Maybe Reply)
 
-type PhaseResult a = Either SessionErr (Transition a, Reply)
+type PhaseResult a = Transition a
 
 class Process s where
   type Next s
@@ -111,31 +171,31 @@ class Process s where
   processQuery :: Phase s -> Either QueryErr Query -> PhaseResult s
   processQuery session query =
     case query of
-      Left err -> Left (Query err)
       Right ok -> process session ok
+      Left err -> case err of
+        Client Disconn -> Term Nothing
+        Client Timeout -> Term . Just . RepErr . Query $ Client Disconn
+        _ -> Stay (session, RepErr $ Query err)
 
   process :: Phase s -> Query -> PhaseResult s
 
 -- Authentication Phase
 
-startSession :: Phase Auth
-startSession = AuthPhase Nothing
+startSession :: (Phase Auth, Reply)
+startSession = (AuthPhase Nothing, RepHelo)
 
 processUser :: Phase Auth -> ByteString -> PhaseResult Auth
-processUser (AuthPhase _) user = case userValidate user of
-  Right user' -> Right
-    ( Stay $ AuthPhase (Just user')
-    , RepUser user'
-    )
-  Left err -> Left $ Storage err
+processUser phase@(AuthPhase _) user = case userValidate user of
+  Just user' -> Stay (AuthPhase $ Just user', RepUser)
+  Nothing    -> Stay (phase, RepErr InvalidUser)
 
 processPass :: Phase Auth -> ByteString -> PhaseResult Auth
-processPass (AuthPhase maybeUser) _ = case maybeUser of
-  Nothing   -> Left UserFirst
-  Just user -> Right (Next (AuthedPhase user), RepPass user)    -- TODO: handle correctly
+processPass phase@(AuthPhase maybeUser) _ = case maybeUser of
+  Nothing   -> Stay (phase, RepErr UserFirst)
+  Just user -> Next (AuthedPhase user)
 
 processQuitAuth :: Phase Auth -> PhaseResult Auth
-processQuitAuth (AuthPhase user) = Right (Term, RepQuit $ QuitReply user Nothing)
+processQuitAuth _ = Term $ Just (RepQuit $ QuitReply Nothing)
 
 instance Process Auth where
   type Next Auth = Authed
@@ -144,28 +204,35 @@ instance Process Auth where
     User name -> processUser phase name
     Pass pass -> processPass phase pass
     Quit      -> processQuitAuth phase
-    _         -> Left InvalidPhase
+    _         -> Stay (phase, RepErr InvalidPhase)
 
 -- Transaction Phase
 
-wrapLock :: Username -> (Phase Trans -> IO a) -> Lock -> IO (Either SessionErr a)
+wrapLock :: Username -> (Phase Trans -> Reply -> IO ()) -> Lock -> IO ()
 wrapLock user action lock = do
-  maildrop <- fetchMailbox lock user
+  msgs <- fetchMailbox lock user
 
-  case maildrop of
-    Left err   -> pure $ Left (Storage err)
-    Right msgs -> Right <$> action (TransPhase user lock msgs Set.empty)
+  let count = Seq.length msgs
+  let size  = sum $ msgSize <$> msgs
 
-withAuth :: Phase Authed -> (Phase Trans -> IO a) -> IO (Either SessionErr a)
+  action (TransPhase user lock msgs Set.empty) (RepPass $ PassReply user count size)
+
+withAuth :: Phase Authed -> (Phase Trans -> Reply -> IO ()) -> IO (Maybe Reply)
 withAuth (AuthedPhase user) action = do
   result <- withLock user (wrapLock user action)
 
-  case result of
-    Left err  -> pure $ Left (Storage err)
-    Right res -> pure res
+  pure $ case result of
+    Left err -> Just (RepErr $ Storage err)
+    Right () -> Nothing
 
-visible :: Seq Message -> Set MsgNo -> [(MsgNo, Message)]
-visible msgs dels =
+trash :: Seq Message -> Set MsgNo -> [Message]
+trash msgs dels = [msg | (msg, num) <- zip (toList msgs) msgEnum, Set.member num dels]
+
+seen :: Seq Message -> [Message]
+seen msgs = [msg | msg <- toList msgs, Set.member Seen (msgFlags msg)]
+
+keepView :: Seq Message -> Set MsgNo -> [(MsgNo, Message)]
+keepView msgs dels =
   [ (num, msg)
   | (num, msg) <- zip msgEnum (toList msgs)
   , not $ Set.member num dels
@@ -178,11 +245,11 @@ msgFetch num msgs dels
 
 processStat :: Phase Trans -> PhaseResult Trans
 processStat phase@(TransPhase _ _ msgs dels) =
-  let leftMsgs = visible msgs dels
+  let leftMsgs = keepView msgs dels
       count    = Seq.length msgs - Set.size dels
       sizeSum  = sum $ msgSize . snd <$> leftMsgs
-  in Right
-    ( Stay phase
+  in Stay 
+    ( phase
     , RepStat $ StatReply count sizeSum
     )
 
@@ -192,16 +259,16 @@ buildListEntry (num, msg) = ListEntry num (msgSize msg)
 processListOne :: Phase Trans -> MsgNo -> PhaseResult Trans
 processListOne phase@(TransPhase _ _ msgs dels) num =
   case msgFetch num msgs dels of
-    Nothing  -> Left NoSuchMsg
-    Just msg -> Right
-      ( Stay phase
+    Nothing  -> Stay (phase, RepErr NoSuchMsg)
+    Just msg -> Stay 
+      ( phase
       , RepList . ListOne $ buildListEntry (num, msg)
       )
 
 processListAll :: Phase Trans -> PhaseResult Trans
-processListAll phase@(TransPhase _ _ msgs dels) = Right
-  ( Stay phase
-  , RepList . ListAll $ map buildListEntry (visible msgs dels)
+processListAll phase@(TransPhase _ _ msgs dels) = Stay 
+  ( phase
+  , RepList . ListAll $ map buildListEntry (keepView msgs dels)
   )
 
 buildUidlEntry :: (MsgNo, Message) -> UidlEntry
@@ -210,54 +277,51 @@ buildUidlEntry (num, msg) = UidlEntry num (msgUid msg)
 processUidlOne :: Phase Trans -> MsgNo -> PhaseResult Trans
 processUidlOne phase@(TransPhase _ _ msgs dels) num =
   case msgFetch num msgs dels of
-    Nothing  -> Left NoSuchMsg
-    Just msg -> Right
-      ( Stay phase
+    Nothing  -> Stay (phase, RepErr NoSuchMsg)
+    Just msg -> Stay
+      ( phase
       , RepUidl . UidlOne $ buildUidlEntry (num, msg)
       )
 
 processUidlAll :: Phase Trans -> PhaseResult Trans
-processUidlAll phase@(TransPhase _ _ msgs dels) = Right
-  ( Stay phase
-  , RepUidl . UidlAll $ map buildUidlEntry (visible msgs dels)
+processUidlAll phase@(TransPhase _ _ msgs dels) = Stay 
+  ( phase
+  , RepUidl . UidlAll $ map buildUidlEntry (keepView msgs dels)
   )
 
 processRetr :: Phase Trans -> MsgNo -> PhaseResult Trans
-processRetr (TransPhase user lock msgs dels) num = 
+processRetr phase@(TransPhase user lock msgs dels) num = 
   case msgFetch num msgs dels of
-    Nothing  -> Left NoSuchMsg
-    Just msg -> do
+    Nothing  -> Stay (phase, RepErr NoSuchMsg)
+    Just msg -> 
       let newFlags = Set.insert Seen (msgFlags msg)
-      let newMsgs  = Seq.adjust' (\m -> m { msgFlags = newFlags }) (toIdx num) msgs
-
-      pure
-        ( Stay (TransPhase user lock newMsgs dels)
-        , RepRetr (msgPath msg)
+          newMsgs  = Seq.adjust' (\m -> m { msgFlags = newFlags }) (toIdx num) msgs
+      in Stay 
+        ( TransPhase user lock newMsgs dels
+        , RepRetr $ RetrReply (msgPath msg) (msgSize msg)
         )
   
 processDele :: Phase Trans -> MsgNo -> PhaseResult Trans
-processDele (TransPhase user lock msgs dels) num
-  | Set.member num dels                = Left AlreadyDele
-  | isNothing (msgFetch num msgs dels) = Left NoSuchMsg
-  | otherwise = Right
-      ( Stay (TransPhase user lock msgs (Set.insert num dels))
-      , RepDele num
+processDele phase@(TransPhase user lock msgs dels) num
+  | Set.member num dels                = Stay (phase, RepErr AlreadyDele)
+  | isNothing (msgFetch num msgs dels) = Stay (phase, RepErr NoSuchMsg)
+  | otherwise = Stay
+      ( TransPhase user lock msgs (Set.insert num dels)
+      , RepDele $ DeleReply num
       )
 
 processRset :: Phase Trans -> PhaseResult Trans
-processRset (TransPhase user lock msgs dels) = Right
-  ( Stay (TransPhase user lock msgs Set.empty)
-  , RepRset (Set.size dels)
+processRset (TransPhase user lock msgs dels) = Stay
+  ( TransPhase user lock msgs Set.empty
+  , RepRset $ RsetReply (Set.size dels) (sum $ msgSize <$> trash msgs dels)
   )
 
 processNoop :: Phase Trans -> PhaseResult Trans
-processNoop phase = Right (Stay phase, RepNoop)
+processNoop phase = Stay (phase, RepNoop)
 
 processQuitTrans :: Phase Trans -> PhaseResult Trans
-processQuitTrans (TransPhase user lock msgs dels) = Right
-  ( Next (UpdatePhase user lock msgs dels)
-  , RepQuit $ QuitReply (Just user) (Just $ Seq.length msgs - Set.size dels)
-  )
+processQuitTrans (TransPhase user lock msgs dels) =
+  Next (UpdatePhase user lock msgs dels)
 
 instance Process Trans where
   type Next Trans = Update
@@ -273,10 +337,11 @@ instance Process Trans where
     Rset            -> processRset phase
     Noop            -> processNoop phase
     Quit            -> processQuitTrans phase
-    _               -> Left InvalidPhase
+    _               -> Stay (phase, RepErr InvalidPhase)
 
-finishSession :: Phase Update -> IO ()
-finishSession (UpdatePhase user lock msgs dels) = updateMailbox lock user trash keep
-  where
-    trash = [msg | (msg, num) <- zip (toList msgs) msgEnum, Set.member    num dels]
-    keep  = [msg | (msg, num) <- zip (toList msgs) msgEnum, Set.notMember num dels]
+-- Update Phase
+
+finishSession :: Phase Update -> IO Reply
+finishSession (UpdatePhase user lock msgs dels) = do
+  updateMailbox lock user (trash msgs dels) (seen msgs)
+  pure $ RepQuit $ QuitReply (Just $ Seq.length msgs - Set.size dels)

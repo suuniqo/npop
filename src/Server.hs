@@ -5,6 +5,7 @@ module Server
   ( Listener
   , withListener
   , Connection (..)
+  , acquireClient
   , withClient
   , withClient'
   , ClientErr (..)
@@ -12,7 +13,7 @@ module Server
   , recvClient
   ) where
 
-import GHC.IO.Exception (IOErrorType(Interrupted, ResourceVanished, ResourceExhausted))
+import GHC.IO.Exception (IOErrorType(Interrupted, ResourceVanished, ResourceExhausted, ResourceBusy))
 
 import Network.Socket
   ( withSocketsDo
@@ -200,13 +201,13 @@ shouldRetryRecv err =
 data ClientErr
   = TooLong
   | Timeout
-  | EOF
+  | Disconn
 
 instance Show ClientErr where
   show err = case err of
     TooLong -> "query is too long"
-    Timeout -> "client idle timeout"
-    EOF     -> "client disconnected"
+    Timeout -> "autologout timeout expired"
+    Disconn -> "client disconnected"
 
 recvClient :: Connection -> IO (Either ClientErr ByteString)
 recvClient conn = do
@@ -227,9 +228,12 @@ recvClient conn = do
             pure (Right line)
         | otherwise -> do
             maybeChunk <- tryTimeout idleTimeout retryRecv
+              `catch` \(err :: SysErr) -> case classify err of
+                ResourceBusy  -> pure (Just BS.empty)
+                _             -> throwIO err
             case maybeChunk of
               Nothing -> pure (Left Timeout)
               Just chunk -> do
                 if BS.null chunk
-                then pure (Left EOF)
+                then pure (Left Disconn)
                 else go (buff <> chunk)

@@ -5,6 +5,7 @@ module Config
   , backoffMax
   , idleTimeout
   , readChunk
+  , storageRoot
   , maxSizeQuery
   , maxSizeResponse
   ) where
@@ -33,6 +34,9 @@ backoffMax = secInMicro * 16
 
 readChunk :: Int
 readChunk = 4096
+
+storageRoot :: FilePath
+storageRoot = "/Users/sunico/mail"
 
 -- Fixed (Protocol)
 

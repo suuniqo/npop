@@ -4,19 +4,13 @@ module Storage
   ( StorageErr (..)
   , Message (..)
   , Flag (..)
-  , UID
-  , Username
   , Lock
   , withLock
-  , userValidate
   , fetchMailbox
   , updateMailbox
   ) where
 
 import Control.Exception (bracket, catch, throwIO)
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as BS
-import Data.Char (isAlphaNum)
 import Data.List (stripPrefix)
 import Data.Set (Set)
 import Data.Sequence (Seq)
@@ -38,8 +32,11 @@ import Text.Read (readMaybe)
 
 import Error
   ( Oper (OpClose, OpListDir, OpOpen, OpStatFile, OpUnlink, OpMove)
-  , SysErr, annotate, classify
+  , SysErr, annotate, classify, corruptMailErr
   )
+
+import Config (storageRoot)
+import Types (Username (unUser), UID (unUID), readUID)
 
 -- Data
 
@@ -49,9 +46,7 @@ data Flag
   | Replied
   | Seen
   | Trashed
-  deriving (Eq, Ord)
-
-newtype UID = UID { unUID :: String }
+  deriving (Show, Eq, Ord)
 
 data Message = Message
   { msgPath  :: !FilePath
@@ -60,19 +55,22 @@ data Message = Message
   , msgFlags :: !(Set Flag)
   , msgUid   :: !UID
   }
+  deriving Show
 
 data Lock = Lock
   { lockPath :: !FilePath
   , lockFd   :: !Fd
   }
-
-newtype Username = Username String
+  deriving Show
 
 data StorageErr
   = UserLocked
-  | InvalidUser
   | NoSuchUser
-  | CorruptMail
+
+instance Show StorageErr where
+  show err = case err of
+    UserLocked -> "mailbox in use"
+    NoSuchUser -> "invalid credentials"
 
 -- Syscalls
 
@@ -110,9 +108,6 @@ tryMove src dst = annotate (OpMove src dst) call
 
 -- Layout
 
-storageRoot :: FilePath
-storageRoot = "/mail"
-
 lockName :: FilePath
 lockName = ".lock"
 
@@ -126,7 +121,7 @@ mailSep :: FilePath
 mailSep = ":2"
 
 userRoot :: Username -> FilePath
-userRoot (Username user) = storageRoot </> user
+userRoot user = storageRoot </> unUser user
 
 userLockPath :: Username -> FilePath
 userLockPath user = userRoot user </> lockName
@@ -173,24 +168,22 @@ flagFromChar c = case c of
   'P' -> Just Passed
   _   -> Nothing
 
-buildFlags :: String -> Maybe (Set Flag)
-buildFlags info = case stripPrefix mailSep info of
+readFlags :: String -> Maybe (Set Flag)
+readFlags info = case stripPrefix mailSep info of
   Nothing -> Just Set.empty
   Just fs -> Set.fromList <$> mapM flagFromChar fs
 
-buildTime :: String -> Maybe POSIXTime
-buildTime = readMaybe . takeWhile (/= '.')
-
-buildUid :: String -> Maybe UID
-buildUid = Just . UID
+readTime :: String -> Maybe POSIXTime
+readTime = (toTime <$>) . readMaybe . takeWhile (/= '.')
+  where toTime = fromIntegral :: Integer -> POSIXTime
 
 buildMessage :: (FilePath, FileOffset) -> Maybe Message
 buildMessage (path, size) = do
   let (base, info) = break (== ':') (takeFileName path)
 
-  flags <- buildFlags info
-  time  <- buildTime base
-  uid   <- buildUid base
+  flags <- readFlags info
+  time  <- readTime base
+  uid   <- readUID base
 
   pure $ Message path (fromIntegral size) time flags uid
 
@@ -227,29 +220,27 @@ moveMessage root msg = tryMove src (root </> dir </> dst)
 
 -- Methods
 
-userValidate :: ByteString -> Either StorageErr Username
-userValidate user
-  | BS.all isAlphaNum user = Right $ Username (BS.unpack user)
-  | otherwise              = Left InvalidUser
-
 withLock :: Username -> (Lock -> IO a) -> IO (Either StorageErr a)
-withLock user action =
-  (Right <$> bracket (acquireLock (userLockPath user)) releaseLock action)
-    `catch` \(err :: SysErr) ->
-      case classify err of
-        AlreadyExists -> pure $ Left UserLocked
-        NoSuchThing   -> pure $ Left NoSuchUser
-        _             -> throwIO err
+withLock user action = do
+  result <- (Right <$> acquireLock (userLockPath user))
+    `catch` \(err :: SysErr) -> case classify err of
+      AlreadyExists -> pure $ Left UserLocked
+      NoSuchThing   -> pure $ Left NoSuchUser
+      _             -> throwIO err
 
-fetchMailbox :: Lock -> Username -> IO (Either StorageErr (Seq Message))
+  case result of
+    Left e     -> pure $ Left e
+    Right lock -> Right <$> bracket (pure lock) releaseLock action
+
+fetchMailbox :: Lock -> Username -> IO (Seq Message)
 fetchMailbox _ user = do
   maybeMsgs <- mapM buildMessage <$> maildirFiles user
 
-  pure $ case maybeMsgs of
-    Nothing   -> Left CorruptMail
-    Just msgs -> Right (Seq.fromList msgs)
+  case maybeMsgs of
+    Nothing   -> throwIO corruptMailErr
+    Just msgs -> pure $ Seq.fromList msgs
 
 updateMailbox :: Lock -> Username -> [Message] -> [Message] -> IO ()
-updateMailbox _ user trash keep = do
-  mapM_ (moveMessage (userRoot user)) keep
+updateMailbox _ user trash seen = do
+  mapM_ (moveMessage (userRoot user)) seen
   mapM_ deleMessage trash

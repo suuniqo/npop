@@ -2,7 +2,6 @@ module Main where
 
 import Control.Concurrent (forkIO)
 import Control.Monad (void)
-import Data.ByteString.Char8 (pack)
 
 import Server
     ( Connection(connPeer),
@@ -15,29 +14,61 @@ import Server
       Connection,
       Listener )
 
-import Query (buildQuery)
+import Query (buildQuery, Query, QueryErr)
 
 import Log (emit, Severity(..))
+import Session (processQuery, startSession, Phase, Auth, Transition (Stay, Next, Term), Authed, withAuth, Trans, finishSession, Reply, Update)
+import Data.Foldable (for_)
+import Serialize (Serialize(serialize))
 
-sendMsg :: Connection -> IO ()
-sendMsg conn = do
-  line <- recvClient conn
+sendReply :: Connection -> Reply -> IO ()
+sendReply conn reply = serialize reply >>= sendClient conn
 
-  let query = buildQuery line
-  let response = show query <> "\r\n"
+recvQuery :: Connection -> IO (Either QueryErr Query)
+recvQuery conn = buildQuery <$> recvClient conn
 
-  sendClient conn (pack response)
+runUpdate :: Connection -> Phase Update -> IO ()
+runUpdate conn phase = do
+  reply <- finishSession phase
+  sendReply conn reply
 
-  case query of
-    Left err -> emit Fatal err
-    Right _  -> sendMsg conn
+runTrans :: Connection -> Phase Trans -> Reply -> IO ()
+runTrans conn phase reply = do
+  sendReply conn reply
+
+  query <- recvQuery conn
+
+  case processQuery phase query of
+    Stay (curr, reply') -> runTrans  conn curr reply'
+    Next next           -> runUpdate conn next
+    Term reply'         -> mapM_ (sendReply conn) reply'
+
+tryAuth :: Connection -> Phase Authed -> IO ()
+tryAuth conn auth = do
+  result <- withAuth auth (runTrans conn)
+  for_ result (runAuth conn (fst startSession))
+
+runAuth :: Connection -> Phase Auth -> Reply -> IO ()
+runAuth conn phase reply = do
+  sendReply conn reply
+
+  query <- recvQuery conn
+
+  case processQuery phase query of
+    Stay (curr, reply') -> runAuth   conn curr reply'
+    Next next           -> tryAuth   conn next
+    Term reply'         -> mapM_ (sendReply conn) reply'
+
+runSession :: Connection -> IO ()
+runSession conn = do
+  emit Info $ "new client: " ++ show (connPeer conn)
+  uncurry (runAuth conn) startSession
+  emit Info $ "bye client: " ++ show (connPeer conn)
 
 serverLoop :: Listener -> IO ()
 serverLoop listener = do
   conn <- acquireClient listener
-  emit Info $ "new client: " ++ show (connPeer conn)
-
-  void . forkIO $ withClient' conn sendMsg
+  void . forkIO $ withClient' conn runSession
   serverLoop listener
 
 main :: IO ()
