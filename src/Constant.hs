@@ -15,6 +15,7 @@ module Constant
     -- * Maildir
   , curName
   , newName
+  , tmpName
   , mailSep
   ) where
 
@@ -59,6 +60,10 @@ curName = "cur"
 -- | Name of the unseen mail directory.
 newName :: FilePath
 newName = "new"
+
+-- | Name of the temp mail directory.
+tmpName :: FilePath
+tmpName = "tmp"
 
 -- | UID and flag separator of mail.
 mailSep :: FilePath
