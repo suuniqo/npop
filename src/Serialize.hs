@@ -1,11 +1,23 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 
-module Serialize (serialize, excpResponse) where
+{-|
+Module      : Serialize
+Description : POP3 reply serialization
+Portability : POSIX
+
+Defines the 'Serialize' type class and it's implementation for 'Reply',
+which processes it into a 'ByteString' so that it can be sent into the network.
+-}
+module Serialize
+  ( -- * Class
+    serialize
+  ) where
 
 import Data.List (dropWhileEnd)
-import Data.ByteString (ByteString, intercalate)
-import Data.ByteString.Char8 (pack, split)
 import qualified Data.ByteString as BS
+import Data.ByteString (ByteString)
+import Data.ByteString.Char8 (pack, split)
 
 import Session
   ( Reply (..)
@@ -22,39 +34,52 @@ import Session
   , SessionErr (..)
   )
 
+
+-- Imports --------------------------------------------------------------
+
 import Error (annotate, Oper (OpRead))
 import Data.Maybe (fromMaybe)
+import Control.Monad.IO.Class (MonadIO(liftIO))
 
--- Syscalls
 
+-- Syscalls -------------------------------------------------------------
+
+-- | Annotated 'readFile' syscall which given
+-- the path, loads its contents into a 'ByteString'
+--
+-- Throws 'SysErr' on failure.
 tryReadFile :: FilePath -> IO ByteString
 tryReadFile path = annotate OpRead call
   where call = BS.readFile path
 
--- Constants
 
+-- Constants ------------------------------------------------------------
+
+-- | All POP3 response lines must terminate with CRLF.
 crlf :: ByteString
 crlf = "\r\n"
 
+-- | All POP3 positive responses must start with "+OK".
 okInd :: ByteString
 okInd = "+OK"
 
-okReply :: ByteString
-okReply = okInd <> crlf
-
-term :: ByteString
-term = "." <> crlf
-
+-- | All POP3 negative responses must start with "-ERR".
 errInd :: ByteString
 errInd = "-ERR"
 
-excpResponse :: ByteString
-excpResponse = errInd <> " " <> "internal failure"
+-- | All POP3 multiline responses must finish with
+-- the terminating octet "." followed by a CRLF.
+term :: ByteString
+term = "." <> crlf
 
--- Formatting
 
+-- Formatting -----------------------------------------------------------
+
+-- | Formats the contents of a file following the POP3 protocol.
+-- This is done by replacing all newlines by CRLF and by dot-stuffing,
+-- which consists on escaping all lines which start with "." with another ".".
 formatFile :: ByteString -> ByteString
-formatFile = intercalate "\r\n" . map (dotStuff . stripCR) . dropWhole . split '\n'
+formatFile = BS.intercalate "\r\n" . map (dotStuff . stripCR) . dropWhole . split '\n'
   where
     stripCR line = fromMaybe line (BS.stripSuffix "\r" line)
     dotStuff line
@@ -62,26 +87,37 @@ formatFile = intercalate "\r\n" . map (dotStuff . stripCR) . dropWhole . split '
         | otherwise              = line
     dropWhole = dropWhileEnd BS.null
 
--- Serialize
 
+-- Type Class -----------------------------------------------------------
+
+-- | Serializes a type into a 'ByteString'
+-- so that it can be sent into the network.
 class Serialize a where
-  serialize :: a -> IO ByteString
+  -- Processes 'a' into a 'ByteString'.
+  -- Works with any monad with 'MonadIO'.
+  serialize :: MonadIO f => a -> f ByteString
 
+
+-- Reply Instance -------------------------------------------------------
+
+-- | 'Reply' implementation of 'Serialize'.
 instance Serialize Reply where
-  serialize reply = case reply of
+  serialize = \case
     RepHelo      -> pure $ okInd <> " POP3 server ready" <> crlf
-    RepUser      -> pure okReply
+    RepUser      -> pure $ okInd <> crlf
     RepPass pass -> serialize pass
     RepStat stat -> serialize stat
     RepList list -> serialize list
     RepRetr retr -> serialize retr
     RepDele dele -> serialize dele
     RepRset rset -> serialize rset
-    RepNoop      -> pure okReply
+    RepNoop      -> pure $ okInd <> crlf
     RepUidl uidl -> serialize uidl
     RepQuit quit -> serialize quit
-    RepErr  err -> serialize err
+    RepExcp      -> pure $ errInd <> " " <> "internal failure"
+    RepErr  err  -> serialize err
 
+-- | Serializes the PASS command reply, with the format:
 -- +OK <user>'s maildrop has <count> messages (<size> octets)
 instance Serialize PassReply where
   serialize pass = pure $ okInd
@@ -94,7 +130,8 @@ instance Serialize PassReply where
     <> " octets)"
     <> crlf
 
--- +OK nn mm
+-- | Serializes the STAT command reply, with the format:
+-- +OK <count> <size>
 instance Serialize StatReply where
   serialize stat = pure $ okInd
     <> " "
@@ -103,33 +140,35 @@ instance Serialize StatReply where
     <> (pack . show . statSize) stat
     <> crlf
 
--- nn mm
+-- | Serializes a LIST command line, with the format:
+-- <num> <size>
 instance Serialize ListEntry where
   serialize entry = pure $ ""
     <> (pack . show . listId) entry
     <> " "
     <> (pack . show . listSize) entry
 
--- +OK nn mm
--- +OK <count> messages (<size> octets)
--- n1 m1
+-- | Serializes a LIST command reply, with the format:
+-- +OK
+-- 1 <size1>
 -- ...
--- nk mk
+-- n <sizen>
 -- .
 instance Serialize ListReply where
-  serialize list = case list of
+  serialize = \case
     ListOne entry -> do
       s <- serialize entry
       pure $ okInd <> " " <> s <> crlf
     ListAll entries -> do
       serialized <- mapM serialize entries
-      pure $ intercalate crlf (okInd : serialized ++ [term])
+      pure $ BS.intercalate crlf (okInd : serialized ++ [term])
 
+-- | Serializes a RETR command reply, with the format:
 -- +OK <size> octets
--- <file contents>
+-- <dot-stuffed file contents>
 -- .
 instance Serialize RetrReply where
-  serialize retr = do
+  serialize retr = liftIO $ do
     contents <- formatFile <$> tryReadFile (retrPath retr)
 
     let header = okInd
@@ -139,8 +178,9 @@ instance Serialize RetrReply where
 
     pure $ if BS.null contents
       then header <> crlf <> term
-      else intercalate crlf [header, contents, term]
+      else BS.intercalate crlf [header, contents, term]
   
+-- | Serializes a DELE command reply, with the format:
 -- +OK message <id> deleted
 instance Serialize DeleReply where
   serialize dele = pure $ okInd
@@ -149,6 +189,7 @@ instance Serialize DeleReply where
     <> " deleted"
     <> crlf
 
+-- | Serializes a RSET command reply, with the format:
 -- +OK restored <count> messages (<size> octets)
 instance Serialize RsetReply where
   serialize rset = pure $ okInd
@@ -159,30 +200,38 @@ instance Serialize RsetReply where
     <> " octets)"
     <> crlf
 
--- nn uu
+-- | Serializes a UIDL command line, with the format:
+-- <num> <uid>
 instance Serialize UidlEntry where
   serialize entry = pure $ ""
     <> (pack . show . uidlId) entry
     <> " "
     <> (pack . show . uidlUID) entry
 
--- +OK nn uu
+-- | Serializes a UIDL command reply, with the format:
 -- +OK
--- n1 u1
+-- 1 <uid1>
 -- ...
--- nk uk
+-- n <uidn>
 -- .
 instance Serialize UidlReply where
-  serialize list = case list of
+  serialize = \case
     UidlOne entry -> do
       s <- serialize entry
       pure $ okInd <> " " <> s <> crlf
     UidlAll entries -> do
       serialized <- mapM serialize entries
-      pure $ intercalate crlf (okInd : serialized ++ [term])
+      pure $ BS.intercalate crlf (okInd : serialized ++ [term])
 
+-- | Serializes a QUIT command reply.
+--
+-- If the user didn't authenticate, the format is:
 -- +OK <user> POP3 server signing off
+--
+-- If the user authenticated and his mailbox is empty, the format is:
 -- +OK <user> POP3 server signing off (maildrop empty)
+--
+-- If the user authenticated and his mailbox isn't empty, the format is:
 -- +OK <user> POP3 server signing off (<count> messages left)
 instance Serialize QuitReply where
   serialize quit = pure $ case quitCount quit of
@@ -198,6 +247,7 @@ instance Serialize QuitReply where
       <> " messages left)"
       <> crlf
 
+-- | Serializes an error reply, with the format:
 -- -Err <msg>
 instance Serialize SessionErr where
   serialize err = pure $ errInd

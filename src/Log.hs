@@ -1,32 +1,63 @@
+{- |
+Module      : Log
+Description : Server Logging
+Portability : POSIX
+
+Logging module for structured log output to stderr.
+-}
 module Log
-  ( Severity(..)
+  ( Severity (..)
   , emit
   ) where
 
-import System.IO (hPrint, stderr)
-import Data.List (intercalate)
+
+-- Imports --------------------------------------------------------------
+
 import Control.Concurrent (ThreadId, myThreadId)
+import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List (intercalate)
+import System.IO (hPrint, stderr)
 
 import Constant (progName)
 
+
+-- Types ----------------------------------------------------------------
+
+-- | Severity level of a log entry.
 data Severity
-  = Info
-  | Warn
-  | Fatal
+  = Info        -- ^ Normal operational messages
+  | Warn        -- ^ Non-fatal unexpected conditions
+  | Fail        -- ^ Unrecoverable errors
 
 instance Show Severity where
-  show Info  = "info"
-  show Warn  = "warning"
-  show Fatal = "fatal"
+  show Info = "info"
+  show Warn = "warn"
+  show Fail = "fail"
 
-data LogData = LogData Severity String ThreadId
+-- | Internal representation of a log,
+-- including severity, thread id and message.
+data LogEntry = LogEntry Severity String ThreadId
 
-instance Show LogData where
-  show (LogData sever msg thid) = intercalate ": " [progName, show thid, show sever, msg]
+instance Show LogEntry where
+  show (LogEntry sever msg thid) = intercalate ": " [progName, show thid, show sever, msg]
 
-emitEntry :: LogData -> IO ()
+
+-- Operations -----------------------------------------------------------
+
+-- | Writes a 'LogEntry' to stderr.
+emitEntry :: LogEntry -> IO ()
 emitEntry = hPrint stderr
 
-emit :: Severity -> String -> IO ()
-emit sever msg = entry >>= emitEntry
-  where entry = LogData sever msg <$> myThreadId
+-- | Emits a log entry to stderr with the included
+-- severity and message. Works with any monad with 'MonadIO'.
+--
+-- Output format: @progName: ThreadId N: severity: message@
+--
+-- Examples:
+--
+-- > emit Info "normal"
+-- > emit Warn "unexpected"
+-- > emit Fail "unrecoverable"
+emit :: MonadIO m => Severity -> String -> m ()
+emit sever msg = liftIO $ entry >>= emitEntry
+  where entry = LogEntry sever msg <$> myThreadId

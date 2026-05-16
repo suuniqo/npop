@@ -1,78 +1,90 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DataKinds #-}
 
 module Main where
 
-import Control.Monad (forever)
-import Control.Monad.Reader (MonadIO (liftIO))
-import Control.Exception (SomeException, catch)
 
+-- Imports --------------------------------------------------------------
+
+import Control.Monad (forever)
+import Control.Exception (SomeException)
+import qualified UnliftIO as UIO
+
+import App (App, runApp, buildEnv, BuildErr (..))
+import Log (emit, Severity(..))
+import Query (buildQuery, Query, QueryErr)
 import Server
   ( Connection
   , Listener
   , recvClient
   , sendClient
   , withListener
-  , withClient
+  , forkClient
   )
-
-import Log (emit, Severity(..))
-import Query (buildQuery, Query, QueryErr)
-import Serialize (serialize, excpResponse)
-
+import Serialize (serialize)
 import Session
   ( Phase
-  , Auth
-  , Authed
-  , Trans
-  , Update
+  , PhaseTag (..)
   , Reply
   , Transition (..)
-  , processQuery
+  , excepReply
   , startSession
   , withAuth
-  , finishSession, greeting
+  , finishSession
+  , processQuery
   )
 
-import App (App, runApp, buildEnv, BuildErr (..))
+
+-- Error Handlers -------------------------------------------------------
+
+onListenerErr :: SomeException -> App ()
+onListenerErr err = emit Fail $ "failed to acquire listener: " <> show err
+
+onAcceptErr :: SomeException -> App ()
+onAcceptErr err = emit Fail $ "failed when accepting client" <> show err
+
+onClientErr :: Connection -> SomeException -> App ()
+onClientErr conn err = do
+  sendReply conn excepReply
+  emit Fail $ "failed while attending client" <> show err
+
+
+-- Network Wrappers -----------------------------------------------------
 
 sendReply :: Connection -> Reply -> App ()
-sendReply conn reply = liftIO $ serialize reply >>= sendClient conn
+sendReply conn reply = serialize reply >>= sendClient conn
 
 recvQuery :: Connection -> App (Either QueryErr Query)
 recvQuery conn = buildQuery <$> recvClient conn
 
-handleExcp :: Connection -> Either SomeException () -> App ()
-handleExcp conn result =
-  case result of
-    Right ()  -> pure ()
-    Left err  -> do
-      liftIO $ emit Fatal (show err)
-      liftIO $ sendClient conn excpResponse
-        `catch` \(err' :: SomeException) ->
-          emit Warn ("failed to send error response: " <> show err')
 
-runUpdate :: Connection -> Phase Update -> App ()
-runUpdate conn phase = do
+-- Connection Logic -----------------------------------------------------
+
+runUpdt :: Connection -> Phase Updt -> App ()
+runUpdt conn phase = do
   reply <- finishSession phase
   sendReply conn reply
 
-runTrans :: Connection -> Phase Trans -> Reply -> App ()
-runTrans conn phase reply = do
+runTrns :: Connection -> Phase Trns -> Reply -> App ()
+runTrns conn phase reply = do
   sendReply conn reply
 
   query <- recvQuery conn
 
   case processQuery phase query of
-    Stay phase' reply' -> runTrans  conn phase' reply'
-    Next phase'        -> runUpdate conn phase'
+    Stay phase' reply' -> runTrns conn phase' reply'
+    Next phase'        -> runUpdt conn phase'
     Term        reply' -> sendReply conn reply'
-    Abrt               -> liftIO $ emit Warn "client disconnected"
+    Abrt               -> emit Warn "client disconnected"
 
-runAuthed :: Connection -> Phase Authed -> App ()
-runAuthed conn auth = do
-  result <- withAuth auth (runTrans conn)
-  mapM_ (runAuth conn startSession) result
+runVerf :: Connection -> Phase Verf -> App ()
+runVerf conn auth = do
+  result <- withAuth auth (runTrns conn)
+
+  case result of 
+    Left (phase, reply) -> runAuth conn phase reply
+    Right ()            -> pure ()
 
 runAuth :: Connection -> Phase Auth -> Reply -> App ()
 runAuth conn phase reply = do
@@ -81,27 +93,36 @@ runAuth conn phase reply = do
   query <- recvQuery conn
 
   case processQuery phase query of
-    Stay phase' reply' -> runAuth   conn phase' reply'
-    Next phase'        -> runAuthed conn phase'
+    Stay phase' reply' -> runAuth conn phase' reply'
+    Next phase'        -> runVerf conn phase'
     Term        reply' -> sendReply conn reply'
-    Abrt               -> liftIO $ emit Warn "client disconnected"
+    Abrt               -> emit Warn "client disconnected"
 
 runSession :: Connection -> App ()
-runSession conn = do
-  liftIO $ emit Info $ "new client:" <> show conn
-  runAuth conn startSession greeting
-  liftIO $ emit Info $ "bye client:" <> show conn
+runSession conn = 
+  let (phase, reply) = startSession
+  in do
+    emit Info $ "new client: " <> show conn
+    runAuth conn phase reply
+    emit Info $ "bye client: " <> show conn
 
-listenLoop :: Listener -> App a
-listenLoop listener = forever (withClient listener runSession handleExcp)
+
+-- Listener Logic -------------------------------------------------------
+
+listenLoop :: Listener -> App ()
+listenLoop listener = forever $
+  forkClient listener runSession onClientErr `UIO.catch` onAcceptErr
 
 startServer :: App ()
 startServer = do
-  liftIO $ emit Info "server ready"
-  withListener listenLoop
-  
+  emit Info "server ready"
+  withListener listenLoop `UIO.catch` onListenerErr
+
+
+-- Main -----------------------------------------------------------------
+
 main :: IO ()
 main = buildEnv >>= \case
-  Left (ConfigErr err) -> emit Fatal $ "failed to build config: " <> show err
-  Left (ShadowErr err) -> emit Fatal $ "failed to build shadow: " <> show err
+  Left (ConfigErr err) -> emit Fail $ "failed to build config: " <> show err
+  Left (ShadowErr err) -> emit Fail $ "failed to build shadow: " <> show err
   Right env            -> runApp startServer env
