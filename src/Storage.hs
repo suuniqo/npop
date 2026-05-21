@@ -152,10 +152,10 @@ userLockPath user = do
 
 -- Locking --------------------------------------------------------------
 
--- Encodes a mailbox lock.
+-- | Encodes a mailbox lock.
 data Lock = Lock
-  { lockPath :: !FilePath       -- ^ Filepath of the lock
-  , lockFd   :: !Fd             -- ^ File descriptor of the lock
+  { lockPath :: FilePath        -- ^ Filepath of the lock
+  , lockFd   :: Fd              -- ^ File descriptor of the lock
   } deriving Show
 
 -- | Tries to create and open the provided file with the O_EXCL flag,
@@ -165,8 +165,8 @@ data Lock = Lock
 -- descriptor. Otherwise, 'Nothing' is returned.
 --
 -- Throws 'SysErr' on failure.
-tryOpenExcl :: FilePath -> IO (Maybe Fd)
-tryOpenExcl path =
+openExcl :: FilePath -> IO (Maybe Fd)
+openExcl path =
   let
     flags = defaultFileFlags { creat = Just 0o600 , exclusive = True }
   in
@@ -190,7 +190,7 @@ releaseLock lock = do
 -- Throws 'SysErr' on failure.
 acquireLock :: FilePath -> IO (Either StorageErr Lock)
 acquireLock path =
-  maybe (Left UserLocked) (Right . Lock path) <$> tryOpenExcl path
+  maybe (Left UserLocked) (Right . Lock path) <$> openExcl path
 
 -- | Acquires a 'Lock' for the provided user's mailbox,
 -- runs an action which requires it, and ensures that the

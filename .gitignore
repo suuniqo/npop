@@ -1,2 +1,19 @@
+# build
 dist-newstyle/
+
+# macOS
 .DS_Store
+
+# LaTeX
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+*.bcf*
+*.out
+*.run.xml
+*.toc
+*.xdv
+*.bbl*
+*.blg

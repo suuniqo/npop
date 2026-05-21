@@ -67,4 +67,4 @@ tmpName = "tmp"
 
 -- | UID and flag separator of mail.
 mailSep :: FilePath
-mailSep = ":2"
+mailSep = ":2,"

@@ -51,7 +51,7 @@ import qualified Data.Sequence as Seq
 import Data.Sequence (Seq)
 
 import App (App, AppEnv (shadow))
-import Query (Query (..), QueryErr (Client))
+import Query (Query (..), QueryErr (Client), QueryResult)
 import Server (ClientErr(Disconn, Timeout))
 import Shadow (auth)
 import Storage
@@ -79,7 +79,8 @@ import Types
 
 -- | Encodes the successfully acquired maildrop of a user.
 data Maildrop = Maildrop
-  { mdrpLock :: Lock            -- ^ Exclusive lock over the maildrop
+  { mdrpUser :: Username        -- ^ Username of the maildrop's owner
+  , mdrpLock :: Lock            -- ^ Exclusive lock over the maildrop
   , mdrpMsgs :: Seq Message     -- ^ Maildrop messages
   , mdrpDels :: Set MsgNo       -- ^ Messages marked as deleted
   }
@@ -310,11 +311,8 @@ data Phase (s :: PhaseTag) where
   -- and the session enters the UPDATE phase.
   --
   -- Fields:
-  --   * @Username@   : the authenticated user who owns the maildrop.
-  --   * @Lock@       : the exclusive lock held on the maildrop.
-  --   * @Seq Message@: the ordered sequence of messages in the maildrop.
-  --   * @Set MsgNo@  : the set of message numbers marked for deletion.
-  TransPhase :: Username -> Maildrop -> Phase Trans
+  --   * @Maildrop@: maildrop of the authenticated client
+  TransPhase :: Maildrop -> Phase Trans
 
   -- | Represents the session state during the UPDATE phase.
   --
@@ -323,11 +321,8 @@ data Phase (s :: PhaseTag) where
   -- changes are saved. The TCP connection is then closed.
   --
   -- Fields:
-  --   * @Username@   : the authenticated user whose maildrop is being updated.
-  --   * @Lock@       : the exclusive lock to be released on completion.
-  --   * @Seq Message@: the ordered sequence of messages in the maildrop.
-  --   * @Set MsgNo@  : the set of message numbers to be permanently removed.
-  UpdatePhase :: Username -> Maildrop -> Phase Update
+  --   * @Maildrop@: maildrop of the authenticated client
+  UpdatePhase :: Maildrop -> Phase Update
 
 -- | Encodes a single step in the POP3 session state machine.
 --
@@ -345,13 +340,13 @@ class ProcessQuery (s :: PhaseTag) where
   -- | The phase that follows 's' upon a successful transition.
   type Next s :: PhaseTag
 
-  -- | General @Either QueryErr Query@ processor which
+  -- | General @QueryResult@ processor which
   -- centralizes error handling in case of a @Left QueryErr@,
-  -- delegating the processing of a correct 'Query' to 'process'.
-  processQuery :: Phase s -> Either QueryErr Query -> Transition s
+  -- delegating the processing of a correct 'Query' to processQuery'.
+  processQuery :: Phase s -> QueryResult -> Transition s
   processQuery session query =
     case query of
-      Right ok -> process session ok                -- Correct queries are delegated to 'process'
+      Right ok -> processQuery' session ok          -- Correct queries are delegated to 'process'
       Left err -> case err of
         Client Disconn -> Abrt                      -- If the client disconnects, abort the session
         Client Timeout -> Abrt                      -- If the client times out, abort the session
@@ -360,7 +355,7 @@ class ProcessQuery (s :: PhaseTag) where
   
   -- | Processes a well-formed 'Query' into a 'Reply'
   -- and produces the next POP3 state transition.
-  process :: Phase s -> Query -> Transition s
+  processQuery' :: Phase s -> Query -> Transition s
 
 
 -- Authentication Phase -------------------------------------------------
@@ -406,7 +401,7 @@ processQuitAuth _ = Term (RepQuit $ QuitReply Nothing)
 instance ProcessQuery Auth where
   type Next Auth = Verif             -- Next phase is 'Phase Verif'.
 
-  process phase = \case
+  processQuery' phase = \case
     User name -> processUser phase name                 -- Handles USER command
     Pass pass -> processPass phase pass                 -- Handles PASS command
     Quit      -> processQuitAuth phase                  -- Handles QUIT command
@@ -429,7 +424,7 @@ wrapLock user action lock = do
   let count = Seq.length msgs
   let size  = sum $ msgSize <$> msgs
 
-  action (TransPhase user (Maildrop lock msgs Set.empty)) (RepPass $ PassReply user count size)
+  action (TransPhase (Maildrop user lock msgs Set.empty)) (RepPass $ PassReply user count size)
 
 -- Given a @Phase Verif@, with the client's credentials, tries
 -- to authenticate the user and acquire exclusively his mailbox.
@@ -448,9 +443,11 @@ withAuth :: Phase Verif -> (Phase Trans -> Reply -> App ()) -> App (Either (Phas
 withAuth (VerifPhase user pass) action = do
   shdw  <- asks shadow
 
+  -- The client is authorized
   if not $ auth shdw user pass
     then pure $ Left (AuthPhase Nothing, RepErr InvalidCreds)
     else do
+      -- Tries to acquire the user's maildrop exclusively
       result <- withLock user (wrapLock user action)
 
       pure $ case result of
@@ -465,7 +462,7 @@ withAuth (VerifPhase user pass) action = do
 -- The STAT command returns a tuple containing the total number of non-deleted
 -- messages and the sum of all of their sizes. It is always successful.
 processStat :: Phase Trans -> Transition Trans
-processStat phase@(TransPhase _ maildrop) =
+processStat phase@(TransPhase maildrop) =
   let leftMsgs = msgsLeft maildrop
       count    = keepCount maildrop
       sizeSum  = sum (msgSize <$> leftMsgs)
@@ -481,7 +478,7 @@ buildListEntry (num, msg) = ListEntry num (msgSize msg)
 -- In this case the LIST command returns a tuple containing the message
 -- number and it's size. It can fail if there isn't a message with such number.
 processListOne :: Phase Trans -> MsgNo -> Transition Trans
-processListOne phase@(TransPhase _ maildrop) num =
+processListOne phase@(TransPhase maildrop) num =
   case msgFetch num maildrop of
     Nothing  -> Stay phase (RepErr NoSuchMsg)
     Just msg -> Stay phase (RepList . ListOne $ buildListEntry (num, msg))
@@ -491,7 +488,7 @@ processListOne phase@(TransPhase _ maildrop) num =
 -- In this case the LIST command returns list of tuples containing the number and
 -- size of all non-deleted messages in the maildrop. It is alway successful.
 processListAll :: Phase Trans -> Transition Trans
-processListAll phase@(TransPhase _ maildrop) =
+processListAll phase@(TransPhase maildrop) =
   Stay phase (RepList . ListAll $ map buildListEntry (msgsLeftView maildrop))
 
 -- | Handles the LIST command, given a @Phase Trans@. 
@@ -511,7 +508,7 @@ buildUidlEntry (num, msg) = UidlEntry num (msgUid msg)
 -- In this case the UIDL command returns a tuple containing the message
 -- number and it's unique-id. It can fail if there isn't a message with such number.
 processUidlOne :: Phase Trans -> MsgNo -> Transition Trans
-processUidlOne phase@(TransPhase _ maildrop) num =
+processUidlOne phase@(TransPhase maildrop) num =
   case msgFetch num maildrop of
     Nothing  -> Stay phase (RepErr NoSuchMsg)
     Just msg -> Stay phase (RepUidl . UidlOne $ buildUidlEntry (num, msg))
@@ -521,7 +518,7 @@ processUidlOne phase@(TransPhase _ maildrop) num =
 -- In this case the UIDL command returns list of tuples containing the number and
 -- unique-id of all non-deleted messages in the maildrop. It is alway successful.
 processUidlAll :: Phase Trans -> Transition Trans
-processUidlAll phase@(TransPhase _ maildrop) =
+processUidlAll phase@(TransPhase maildrop) =
   Stay phase (RepUidl . UidlAll $ map buildUidlEntry (msgsLeftView maildrop))
 
 -- | Handles the UIDL command, given a @Phase Trans@. 
@@ -539,13 +536,13 @@ processUidl phase (Just num) = processUidlOne phase num
 -- are loaded lazily on serialization. Additionally, the selected message
 -- is marked with the 'Seen' flag. The command is always succesful.
 processRetr :: Phase Trans -> MsgNo -> Transition Trans
-processRetr phase@(TransPhase user maildrop) num = 
+processRetr phase@(TransPhase maildrop) num = 
   case msgFetch num maildrop of
     Nothing  -> Stay phase (RepErr NoSuchMsg)
     Just msg -> 
       let maildrop' = msgAdjust num (addFlag Seen msg) maildrop
       in Stay 
-        (TransPhase user maildrop')
+        (TransPhase maildrop')
         (RepRetr $ RetrReply (msgPath msg) (msgSize msg))
   
 -- | Handles the DELE command, given a @Phase Trans@.
@@ -555,11 +552,11 @@ processRetr phase@(TransPhase user maildrop) num =
 -- as they can be later restored by the RSET command. It can fail if there
 -- isn't a message with such number, or if the message was already deleted.
 processDele :: Phase Trans -> MsgNo -> Transition Trans
-processDele phase@(TransPhase user maildrop) num
+processDele phase@(TransPhase maildrop) num
   | deleted num maildrop              = Stay phase (RepErr AlreadyDele)
   | isNothing (msgFetch num maildrop) = Stay phase (RepErr NoSuchMsg)
   | otherwise = Stay
-      (TransPhase user (msgDelete num maildrop))
+      (TransPhase (msgDelete num maildrop))
       (RepDele $ DeleReply num)
 
 -- | Handles the RSET command, given a @Phase Trans@.
@@ -569,8 +566,8 @@ processDele phase@(TransPhase user maildrop) num
 -- also indicates the number of message restored as well as their
 -- total size. It is always successful.
 processRset :: Phase Trans -> Transition Trans
-processRset (TransPhase user maildrop) = Stay
-  (TransPhase user maildrop { mdrpDels = Set.empty })
+processRset (TransPhase maildrop) = Stay
+  (TransPhase maildrop { mdrpDels = Set.empty })
   (RepRset $ RsetReply (deleCount maildrop) (sum $ msgSize <$> msgsDeleted maildrop))
 
 -- | Handles the NOOP command, given a @Phase Trans@.
@@ -585,8 +582,7 @@ processNoop phase = Stay phase RepNoop
 -- The difference with quitting during the AUTHENTICATION phase
 -- is that it triggers the UPDATE phase, where all changes are saved.
 processQuitTrans :: Phase Trans -> Transition Trans
-processQuitTrans (TransPhase user maildrop) =
-  Next (UpdatePhase user maildrop)
+processQuitTrans (TransPhase maildrop) = Next (UpdatePhase maildrop)
 
 -- | Processes well-formed queries during the TRANSACTION phase.
 --
@@ -594,7 +590,7 @@ processQuitTrans (TransPhase user maildrop) =
 instance ProcessQuery Trans where
   type Next Trans = Update             -- Next phase is 'Phase Update. 
 
-  process phase = \case
+  processQuery' phase = \case
     Stat            -> processStat phase                    -- Handles STAT command
     List maybeNum   -> processList phase maybeNum           -- Handles LIST command
     Uidl maybeNum   -> processUidl phase maybeNum           -- Handles UIDL command
@@ -602,7 +598,7 @@ instance ProcessQuery Trans where
     Dele num        -> processDele phase num                -- Handles DELE command
     Rset            -> processRset phase                    -- Handles RSET command
     Noop            -> processNoop phase                    -- Handles NOOP command
-    Quit            -> processQuitTrans phase                -- Handles QUIT command
+    Quit            -> processQuitTrans phase               -- Handles QUIT command
     _               -> Stay phase (RepErr InvalidPhase)     -- No other command is permitted
 
 
@@ -613,6 +609,10 @@ instance ProcessQuery Trans where
 --
 -- Throws 'SysErr' on failure.
 finishSession :: Phase Update -> App Reply
-finishSession (UpdatePhase user maildrop) = do
-  updateMailbox (mdrpLock maildrop) user (msgsDeleted maildrop) (msgsSeen maildrop)
-  pure $ RepQuit $ QuitReply $ Just $ keepCount maildrop
+finishSession (UpdatePhase maildrop) =
+  do
+    updateMailbox lock user (msgsDeleted maildrop) (msgsSeen maildrop)
+    pure $ RepQuit $ QuitReply $ Just $ keepCount maildrop
+  where
+    lock = mdrpLock maildrop
+    user = mdrpUser maildrop

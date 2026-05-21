@@ -31,6 +31,23 @@ import Config (Config(storage), StorageConfig (mailRoot, passName))
 import Constant (curName, newName, tmpName)
 import Shadow (userExists)
 
+-- Output ---------------------------------------------------------------
+
+-- Name of the executable
+progName :: String
+progName = "npop-tools"
+
+-- Emits a message through stdout
+emitInf :: String -> IO ()
+emitInf msg = putStrLn (progName ++ ": " ++ msg)
+
+-- Emits an error through stderr and exits
+emitErr :: String -> IO a
+emitErr msg = die (progName ++ ": error: " ++ msg)
+
+-- Emits the script's usage guide
+emitUsage :: IO a
+emitUsage = die "usage: npop-tools add|del|put <username>"
 
 -- Maildir Layout -------------------------------------------------------
 
@@ -83,10 +100,12 @@ readUntilEOF = do
 putMail :: String -> AppEnv -> IO ()
 putMail user env =
   do
-    unless (userExists (shadow env) user) $ die "user doesn't exist"
+    unless (userExists (shadow env) user) $ emitErr "user doesn't exist"
     path <- (newMailDir </>) <$> mailUID
-    hPutStr stderr "Message:\n"
+    hPutStr stderr "message: "
     readUntilEOF >>= writeFile path
+    hPutStr stderr "\n"
+    emitInf $ "sent the message to " ++ user
   where
     newMailDir = head $ mailDirs env user
 
@@ -96,13 +115,14 @@ putMail user env =
 -- | Deletes a user by removing it's shadow file entry and mail directories.
 delUser :: String -> AppEnv -> IO ()
 delUser user env = do
-  unless (userExists (shadow env) user) $ die "user doesn't exist"
+  unless (userExists (shadow env) user) $ emitErr "user doesn't exist"
 
   let deleted = Map.delete user (shadow env)
   let contents = unlines $ map (\(u, h) -> u <> ":" <> h) (Map.toList deleted)
 
   writeFile (shadowPath env) contents
   removeDirectoryRecursive (userDir env user)
+  emitInf $ "deleted user " ++ user
 
 
 -- Adding a User --------------------------------------------------------
@@ -111,13 +131,13 @@ delUser user env = do
 genHash :: String -> IO String
 genHash pass =
   hashPasswordUsingPolicy slowerBcryptHashingPolicy (BS.pack pass)
-    >>= maybe (die "hashing failed") (pure . BS.unpack)
+    >>= maybe (emitErr "hashing failed") (pure . BS.unpack)
 
 -- | Prompts the user to enter a password,
 -- disabling echo so that it isn't leaked.
 promptPass :: IO String
 promptPass = do
-  hPutStr stderr "Password: "
+  hPutStr stderr "password: "
   hFlush stdout
   hSetEcho stdin False
   pass <- getLine
@@ -129,7 +149,7 @@ promptPass = do
 -- hash to the shadow file and creating it's mail directories.
 addUser :: String -> AppEnv -> IO ()
 addUser user env = do
-  when (userExists (shadow env) user) $ die "user already exists"
+  when (userExists (shadow env) user) $ emitErr "user already exists"
 
   pass <- promptPass
   hash <- genHash pass
@@ -138,6 +158,7 @@ addUser user env = do
   appendFile (shadowPath env) entry
 
   mapM_ (createDirectoryIfMissing True) (mailDirs env user)
+  emitInf $ "created user " ++ user
 
 
 -- Startup --------------------------------------------------------------
@@ -145,8 +166,8 @@ addUser user env = do
 -- | Tries to load the application environment. On failure the program dies.
 getEnv :: IO AppEnv
 getEnv = buildEnv >>= \case
-  Left (ConfigErr err) -> die $ "npop-adduser: failed to build config: " <> show err
-  Left (ShadowErr err) -> die $ "npop-adduser: failed to build shadow: " <> show err
+  Left (ConfigErr err) -> emitErr $ "failed to build config: " ++ show err
+  Left (ShadowErr err) -> emitErr $ "failed to build shadow: " ++ show err
   Right env            -> pure env
 
 -- | Selects the appropiate mode based on the args

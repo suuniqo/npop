@@ -14,13 +14,13 @@ module Main where
 
 -- Imports --------------------------------------------------------------
 
-import Control.Monad (forever)
+import Control.Monad (forever, (<=<))
 import Control.Exception (SomeException)
 import qualified UnliftIO as UIO
 
 import App (App, runApp, buildEnv, BuildErr (..))
 import Log (emit, Severity(..))
-import Query (buildQuery, Query, QueryErr)
+import Query (parseQuery, QueryResult)
 import Server
   ( Connection
   , Listener
@@ -65,11 +65,11 @@ onClientErr conn err = do
 
 -- | Sends a 'Reply' to the remote client.
 sendReply :: Connection -> Reply -> App ()
-sendReply conn reply = serialize reply >>= sendClient conn
+sendReply conn = sendClient conn <=< serialize
 
 -- | Receives a 'Query' from the remote client.
-recvQuery :: Connection -> App (Either QueryErr Query)
-recvQuery conn = buildQuery <$> recvClient conn
+recvQuery :: Connection -> App QueryResult
+recvQuery conn = parseQuery <$> recvClient conn
 
 
 -- Session Logic --------------------------------------------------------
@@ -77,7 +77,7 @@ recvQuery conn = buildQuery <$> recvClient conn
 -- | Handles the UPDATE state by finishing the
 -- session and sending the final reply to the client.
 runUpdate :: Connection -> Phase Update -> App ()
-runUpdate conn phase = finishSession phase >>= sendReply conn
+runUpdate conn = sendReply conn <=< finishSession
 
 -- | Handles the TRANSACTION state by attending and
 -- responding user queries until the client quits.
@@ -97,10 +97,8 @@ runTrans conn phase reply = do
 -- On success advances to the TRANSACTION state,
 -- else returns to the AUTHENTICATION state.
 runVerif :: Connection -> Phase Verif -> App ()
-runVerif conn auth = do
-  result <- withAuth auth (runTrans conn)
-
-  case result of 
+runVerif conn auth =
+  withAuth auth (runTrans conn) >>= \case
     Left (phase, reply) -> runAuth conn phase reply
     Right ()            -> pure ()
 
@@ -122,7 +120,7 @@ runAuth conn phase reply = do
 -- | Starts a POP3 session with an acquired client
 -- by greeting them and running the AUTHENTICATION state.
 runSession :: Connection -> App ()
-runSession conn = 
+runSession conn =
   let (phase, reply) = startSession
   in do
     emit Info $ "new client: " <> show conn

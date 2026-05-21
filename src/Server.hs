@@ -203,12 +203,13 @@ tryCandidate addr = bracketOnError (tryOpenSock addr) close setupSock
 bindCandidate :: [AddrInfo] -> IO (Socket, AddrInfo)
 bindCandidate []     = throwIO noCandidatesErr
 bindCandidate [a]    = tryCandidate a
-bindCandidate (a:as) = tryCandidate a `catch` \(err :: SysErr) -> do
-  case seOper err of
-    OpSockOpt -> throwIO err
-    _         -> do
-      emit Warn (show err)
-      bindCandidate as
+bindCandidate (a:as) = tryCandidate a
+  `catch` \(err :: SysErr) -> do
+    case seOper err of
+      OpSockOpt -> throwIO err
+      _         -> do
+        emit Warn (show err)
+        bindCandidate as
 
 -- | Represents a listening socket.
 type Listener = Socket
