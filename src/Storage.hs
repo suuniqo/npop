@@ -75,6 +75,7 @@ import Types
 -- | Encodes a failure when loading or storing messages.
 data StorageErr
   = UserLocked          -- ^ User's mailbox is in use
+  deriving Eq
 
 instance Show StorageErr where
   show err = case err of
@@ -158,6 +159,10 @@ data Lock = Lock
   , lockFd   :: Fd              -- ^ File descriptor of the lock
   } deriving Show
 
+-- | Open flags for opening a file exclusively
+exclFlags :: OpenFileFlags
+exclFlags = defaultFileFlags { creat = Just 0o600 , exclusive = True }
+
 -- | Tries to create and open the provided file with the O_EXCL flag,
 -- which enforces that the file is opened by a single thread at a time.
 --
@@ -167,13 +172,10 @@ data Lock = Lock
 -- Throws 'SysErr' on failure.
 openExcl :: FilePath -> IO (Maybe Fd)
 openExcl path =
-  let
-    flags = defaultFileFlags { creat = Just 0o600 , exclusive = True }
-  in
-    (Just <$> tryOpen path ReadWrite flags)
-      `catch` \(err :: SysErr) -> case classify err of
-        AlreadyExists -> pure Nothing
-        _             -> throwIO err
+  (Just <$> tryOpen path ReadWrite exclFlags)
+    `catch` \(err :: SysErr) -> case classify err of
+      AlreadyExists -> pure Nothing
+      _             -> throwIO err
 
 -- | Releases the provided lock file by first closing
 -- the exclusive file descriptor and then removing the file.

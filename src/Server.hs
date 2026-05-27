@@ -303,6 +303,20 @@ shouldRetryRecv err =
     ResourceExhausted -> Backoff            -- If the system doesn't have enough resources wait
     _                 -> Stop               -- Otherwise propagate the error
 
+-- | Given a listener socket, retires the accept
+-- operation using the appropiate policy.
+retryAccept :: Listener -> Int -> Int -> IO (Socket, SockAddr)
+retryAccept listener bmin bmax =
+  retryBackoff bmin bmax
+  shouldRetryAccept
+  (tryAcceptClient listener)
+
+-- | Given a listener socket, retires the accept
+-- operation using the appropiate policy.
+retryRecv :: Connection -> Int -> Int -> Int -> IO ByteString
+retryRecv conn bmin bmax =
+  retryBackoff bmin bmax shouldRetryRecv
+    . tryRecv (connPeer conn) (connSock conn)
 
 -- Connection -----------------------------------------------------------
 
@@ -329,15 +343,10 @@ acquireClient listener =
     delayMin     <- asks (backoffMin . network . config)
     delayMax     <- asks (backoffMax . network . config)
 
-    (sock, addr) <- liftIO (retryAccept delayMin delayMax)
+    (sock, addr) <- liftIO (retryAccept listener delayMin delayMax)
     buff         <- liftIO (newIORef BS.empty)
 
     pure $ Connection sock addr buff
-  where
-    retryAccept bmin bmax =
-      retryBackoff bmin bmax
-      shouldRetryAccept
-      (tryAcceptClient listener)
 
 -- | Cleans up a 'Connection' by closing it's socket descriptor.
 --
@@ -385,6 +394,7 @@ data ClientErr
   = TooLong     -- ^ Message is too long
   | Timeout     -- ^ Client timed out
   | Disconn     -- ^ Client disconnected
+  deriving Eq
 
 instance Show ClientErr where
   show err = case err of
@@ -412,10 +422,9 @@ fetchChunk conn = do
   time      <- asks (idleTimeout . network . config)
 
   liftIO $ UIO.handle handler $
-    tryTimeout time (retryRecv delayMin delayMax chunkSize)
+    tryTimeout time (retryRecv conn delayMin delayMax chunkSize)
     <&> maybe PeerTimeout Chunk
   where
-    retryRecv bmin bmax = retryBackoff bmin bmax shouldRetryRecv . tryRecv (connPeer conn) (connSock conn)
     handler err = case classify err of
       ResourceVanished -> pure PeerDisconn
       _                -> throwIO err

@@ -21,6 +21,8 @@ import Data.ByteString.Char8 (pack, split)
 
 import Session
   ( Reply (..)
+  , CapaEntry (..)
+  , CapaReply (..)
   , PassReply (..)
   , StatReply (..)
   , ListEntry (..)
@@ -75,17 +77,41 @@ term = "." <> crlf
 
 -- Formatting -----------------------------------------------------------
 
+-- | Strips all empty ByteStrings at the
+-- beginning of the provided list.
+dropWhole :: [ByteString] -> [ByteString]
+dropWhole = dropWhileEnd BS.null
+
+-- | Extracts the lines of a file following the POP3 protocol.
+-- This is done by spliting by newlines, removing trailing
+-- whitespace and escaping all lines which start with ".".
+extractLines :: ByteString -> [ByteString]
+extractLines = dropWhole . split '\n'
+
+-- | If the provided line ends with a '\r',
+-- it removes it. Otherwise, it does nothing.
+stripCR :: ByteString -> ByteString
+stripCR line = fromMaybe line (BS.stripSuffix "\r" line)
+
+-- | If the provided line starts with '.',
+-- this function escapes it by adding another
+-- one in front of it. Otherwise, it does nothing.
+dotStuff :: ByteString -> ByteString
+dotStuff line
+    | BS.isPrefixOf "." line = "." <> line
+    | otherwise              = line
+
+-- | Formats the line of a file following the POP3 protocol.
+-- This is done by escaping it if it starts with "." by
+-- escaping with another ".", and removing trailing whitespace.
+formatLine :: ByteString -> ByteString
+formatLine = dotStuff . stripCR
+
 -- | Formats the contents of a file following the POP3 protocol.
 -- This is done by replacing all newlines by CRLF and by dot-stuffing,
 -- which consists on escaping all lines which start with "." with another ".".
 formatFile :: ByteString -> ByteString
-formatFile = BS.intercalate "\r\n" . map (dotStuff . stripCR) . dropWhole . split '\n'
-  where
-    stripCR line = fromMaybe line (BS.stripSuffix "\r" line)
-    dotStuff line
-        | BS.isPrefixOf "." line = "." <> line
-        | otherwise              = line
-    dropWhole = dropWhileEnd BS.null
+formatFile = BS.intercalate "\r\n" . map formatLine . extractLines
 
 
 -- Type Class -----------------------------------------------------------
@@ -106,6 +132,7 @@ instance Serialize Reply where
     RepHelo      -> pure $ okInd <> " POP3 server ready" <> crlf
     RepUser      -> pure $ okInd <> crlf
     RepPass pass -> serialize pass
+    RepCapa capa -> serialize capa
     RepStat stat -> serialize stat
     RepList list -> serialize list
     RepRetr retr -> serialize retr
@@ -116,6 +143,22 @@ instance Serialize Reply where
     RepQuit quit -> serialize quit
     RepExcp      -> pure $ errInd <> " " <> "internal failure"
     RepErr  err  -> serialize err
+
+-- | Serializes a CAPA command line, with the format:
+-- <capa>
+instance Serialize CapaEntry where
+  serialize entry = pure $ (pack . show ) entry
+
+-- | Serializes the CAPA command reply, with the format:
+-- +OK
+-- <capa1>
+-- ...
+-- <capan>
+-- .
+instance Serialize CapaReply where
+  serialize (CapaReply entries) = do
+    serialized <- mapM serialize entries
+    pure $ BS.intercalate crlf (okInd : serialized ++ [term])
 
 -- | Serializes the PASS command reply, with the format:
 -- +OK <user>'s maildrop has <count> messages (<size> octets)

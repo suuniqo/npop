@@ -70,33 +70,57 @@ library
         Storage
         Shadow
     build-depends:
-        base ^>=4.18.3.0,
-        bytestring,
-        containers,
-        network,
-        directory,
-        filepath,
-        unix,
-        random,
-        time,
-        mtl,
-        containers,
-        unliftio,
-        tomland,
-        bcrypt
+        base ^>=4.18.3.0
+      , bytestring
+      , containers
+      , network
+      , directory
+      , filepath
+      , unix
+      , random
+      , time
+      , mtl
+      , containers
+      , unliftio
+      , tomland
+      , bcrypt
     default-language: Haskell2010
     ghc-options: -Wall
+
+
+test-suite pop3-unit-tests
+  type:                 exitcode-stdio-1.0
+  main-is:              Spec.hs
+  hs-source-dirs:       test
+  build-tool-depends:   hspec-discover:hspec-discover
+  other-modules:
+      StorageSpec
+      ParserSpec
+  build-depends:
+      base ^>=4.18.3.0
+    , bytestring
+    , network
+    , containers
+    , filepath
+    , temporary
+    , directory
+    , hspec
+    , hspec-discover
+    , hedgehog
+    , hspec-hedgehog
+    , npop
+  default-language: Haskell2010
 
 executable npop
     import:           warnings
     main-is:          Main.hs
     build-depends:
-        base ^>=4.18.3.0,
-        bytestring,
-        network,
-        mtl,
-        unliftio,
-        npop
+        base ^>=4.18.3.0
+      , bytestring
+      , network
+      , mtl
+      , unliftio
+      , npop
     hs-source-dirs:   app
     default-language: Haskell2010
 
@@ -105,12 +129,12 @@ executable npop-tools
     main-is:          Tools.hs
     hs-source-dirs:   tools
     build-depends:
-        base ^>=4.18.3.0,
-        bytestring,
-        directory,
-        filepath,
-        containers,
-        unix,
-        bcrypt,
-        npop
+        base ^>=4.18.3.0
+      , bytestring
+      , directory
+      , filepath
+      , containers
+      , unix
+      , bcrypt
+      , npop
     default-language: Haskell2010

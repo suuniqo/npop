@@ -45,7 +45,7 @@
 
 {\large\raggedright\reportauthors\par} % Report authors, group or department
 
-\vspace{0.33\textheight} % Vertical whitespace
+\vspace{0.26\textheight} % Vertical whitespace
 
 %----------------------------------------------------------------------------------------
 
@@ -64,13 +64,15 @@
 
 \section*{Introducción}
 
-El desarrollo de \textit{nano-pop} ha priorizado ante todo la corrección. Un servidor \texttt{POP3} no es una aplicación aislada e independiente, sino que está diseñada para interactuar con otros sistemas, que esperan que se siga el protocolo rigurosamente.
+El desarrollo de \textit{nano-pop} ha priorizado ante todo la corrección. Un servidor \texttt{POP3} no es una aplicación aislada e independiente, sino que está diseñado para interactuar con otros sistemas que esperan un cumplimiento riguroso del protocolo.
 
-En este contexto, el uso de \textit{Haskell} resulta especialmente valioso. Un buen diseño en este lenguaje, no sólo permite garantizar las invariantes del sistema con facilidad, sino que puede lograr que los estados ilegales sean directamente irrepresentables.
+En este contexto, el uso de \textit{Haskell} resulta especialmente valioso. Un buen diseño en este lenguaje no sólo permite garantizar las invariantes del sistema con facilidad, sino también hacer que los estados ilegales sean directamente irrepresentables.
 
-Para ello, se han empleado patrones como \textit{typestate} y \textit{resource acquisition} que, en conjunto, dotan a la aplicación de una robustez muy difícil de alcanzar en otros lenguajes.
+Para ello, se han empleado patrones como \textit{typestate} y \textit{resource acquisition}, que no sólo aportan a la aplicación una robustez difícil de alcanzar en otros lenguajes, sino que también aumentan la claridad del código.
 
-Además, se ha desarrollado un \textit{script} adicional para poder configurar un servidor con mayor facilidad, así como añadir nuevos usuarios y mandarles mensajes localmente.
+Esta prioridad por la corrección también se ha reflejado en la validación del sistema, mediante \textit{unit tests} sobre los módulos más propensos a errores, pruebas de \textit{fuzzing} sobre el \textit{parser} y tests de integración con clientes \texttt{POP3} reales.
+
+Además, se ha desarrollado un \textit{script} adicional para facilitar la configuración del servidor, así como la gestión local de usuarios y mensajes.
 
 %----------------------------------------------------------------------------------------
 
@@ -997,6 +999,107 @@ $ npop-tools put alice
 \vspace{-4pt}
 \captionsetup{type=lstlisting}
 \caption{Mandar un mensaje a Alice.}
+\end{minipage}
+
+%----------------------------------------------------------------------------------------
+%   VALIDACIÓN DEL SISTEMA
+%----------------------------------------------------------------------------------------
+
+%----------------------------------------------------------------------------------------
+%   VALIDACIÓN DEL SISTEMA
+%----------------------------------------------------------------------------------------
+
+\section{Validación del sistema}
+
+Con el objetivo de garantizar la corrección y robustez del servidor, se han realizado dos tipos principales de pruebas. Por un lado, pruebas programáticas sobre los módulos internos más críticos de la aplicación. Por otro, pruebas de integración mediante clientes \texttt{POP3} reales, con el fin de verificar el comportamiento del servidor en escenarios de uso reales y su compatibilidad con el protocolo.
+
+%----------------------------------------------------------------------------------------
+
+\subsection{Pruebas programáticas}
+
+Las pruebas programáticas se han centrado en los dos módulos más propensos a errores: el \textit{parser} de consultas \texttt{POP3} y el módulo de almacenamiento.
+
+El módulo de \textit{parsing} es uno de los más propensos a errores en cualquier aplicación, ya que el procesamiento de entradas externas suele ser especialmente delicado y fácil de implementar de forma incorrecta. Por suerte, los comandos \texttt{POP3} siguen una gramática bastante sencilla:
+
+\begin{center}
+    \texttt{<ESPACIADO> <COMANDO> <ESPACIADO> [<ARGUMENTO> <ESPACIADO>]}
+\end{center}
+
+Dado que la longitud máxima de una consulta es de 45 caracteres, resulta viable generar y comprobar un gran número de casos de forma automática. Para ello se ha utilizado \textit{fuzzing} mediante la librería \textit{Hedgehog}, generando tanto consultas válidas como inválidas y verificando propiedades como la insensibilidad a mayúsculas, la tolerancia al espaciado o la correcta detección de errores en entradas malformadas.
+
+Por otro lado, el módulo de almacenamiento requiere especial fiabilidad, ya que interpreta buzones en formato \textit{Maildir}, extrae los mensajes con sus banderas y serializa buzones virtuales sobre el sistema de ficheros. Su validación es muy importante para garantizar la consistencia de los datos y evitar pérdidas o corrupciones.
+
+En este caso se han utilizado principalmente \textit{unit tests} mediante la librería \textit{HSpec}. Estas pruebas operan sobre directorios temporales donde se ejecutan operaciones reales de lectura y escritura, comprobando finalmente que el estado del buzón coincide con el esperado.
+
+%----------------------------------------------------------------------------------------
+
+\subsection{Pruebas de integración}
+
+Las pruebas de integración se han realizado con clientes reales para validar no solo la corrección del protocolo, sino también la interoperabilidad del servidor con implementaciones ampliamente utilizadas. Se han utilizado herramientas con distintos patrones de uso para detectar posibles desviaciones del estándar y problemas de implementación que no aparecen en pruebas unitarias.
+
+\vspace{-12pt}
+\begin{minipage}[t]{0.50\textwidth}
+\begin{lstlisting}[language={}, numbers=none, basicstyle=\scriptsize]
+$ fetchmail -v -p POP3 -P 110 -u bob
+POP3< +OK POP3 server ready
+POP3> CAPA
+POP3< +OK
+POP3< USER
+POP3< .
+POP3> USER bob
+POP3< +OK
+POP3> PASS *
+POP3< +OK bob's maildrop has 1 messages (374 octets)
+POP3> STAT
+POP3< +OK 1 374
+1 message for bob at localhost (374 octets).
+POP3> LIST 1
+POP3< +OK 1 374
+POP3> RETR 1
+POP3< +OK 374 octets
+reading message bob@localhost:1 of 1 (374 octets) flushed
+POP3> DELE 1
+POP3< +OK message 1 deleted
+POP3> QUIT
+POP3< +OK POP3 server signing off (maildrop empty)
+6.6.4 querying localhost (protocol POP3): poll completed
+normal termination, status 0
+\end{lstlisting}
+\vspace{-4pt}
+\captionsetup{type=lstlisting}
+\caption{Integración con un cliente \textit{fetchmail}}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.45\textwidth}
+\begin{lstlisting}[language={}, numbers=none, basicstyle=\scriptsize]
+$ curl -v pop3://localhost:110/1 --user "bob:admin"
+* Connected to localhost (::1) port 110
+< +OK POP3 server ready
+> CAPA
+< +OK
+< USER
+< .
+> USER bob
+< +OK
+> PASS admin
+< +OK bob's maildrop has 1 messages (39 octets)
+> RETR 1
+< +OK 39 octets
+From: alice@example.com
+To: bob@local
+Subject: Project Update
+Date: Mon, 4 May 2026 09:00:00 +0000
+
+Hi Bob,
+
+I just wanted to say hi.
+
+Alice
+* Connection #0 to host localhost left intact
+\end{lstlisting}
+\vspace{-4pt}
+\captionsetup{type=lstlisting}
+\caption{Integración con un cliente \textit{curl}}
 \end{minipage}
 
 %----------------------------------------------------------------------------------------

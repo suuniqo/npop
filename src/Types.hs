@@ -113,21 +113,25 @@ readMsgNo bs = do
 
 -- | Validated message uniquer identifier.
 newtype UID = UID { unUID :: String }
+  deriving (Eq, Ord)
 
 instance Show UID where
   show = unUID
+
+-- | Checks whether a character is in the
+-- valid range for a POP3 message UID.
+isCharUID :: Char -> Bool
+isCharUID c = c >= '!' && c <= '~' 
 
 -- | Constructs a POP3 'UID' by validating a 'String'.
 -- Returns 'Nothing' if lenfth is greater than
 -- the maximum uid length or if any characters
 -- are outside the defined valid range.
 readUID :: String -> Maybe UID
-readUID string
-  | length string > uidMaxLen = Nothing
-  | not $ all inRange string  = Nothing
-  | otherwise                 = Just (UID string)
-  where
-    inRange c = c >= '!' && c <= '~'
+readUID uid
+  | length uid > uidMaxLen  = Nothing
+  | not $ all isCharUID uid = Nothing
+  | otherwise               = Just (UID uid)
 
 
 -- Message --------------------------------------------------------------
@@ -149,7 +153,7 @@ data Message = Message
   , msgTime  :: POSIXTime   -- ^ Delivery timestamp
   , msgFlags :: Set Flag    -- ^ Flags of the message
   , msgUid   :: UID         -- ^ UID of the message
-  } deriving Show
+  } deriving (Show, Eq, Ord)
 
 -- | Checks if the message contains the provided flag.
 hasFlag :: Flag -> Message -> Bool

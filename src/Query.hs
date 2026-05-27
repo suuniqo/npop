@@ -14,6 +14,7 @@ module Query
   , QueryErr(..)
   , QueryResult
     -- * Builder
+  , parseQuery'
   , parseQuery
   ) where
 
@@ -35,6 +36,7 @@ import Types (MsgNo, readMsgNo)
 data Query
   = User ByteString         -- ^ USER command, with the given username
   | Pass ByteString         -- ^ PASS command, with the given password
+  | Capa                    -- ^ CAPA command
   | Stat                    -- ^ STAT command
   | List (Maybe MsgNo)      -- ^ LIST command, with an optional message number
   | Uidl (Maybe MsgNo)      -- ^ UIDL command, with an optional message number
@@ -43,7 +45,7 @@ data Query
   | Noop                    -- ^ NOOP command
   | Rset                    -- ^ RSET command
   | Quit                    -- ^ QUIT command
-  deriving Show
+  deriving (Show, Eq)
 
 -- | Encodes a failure when parsing
 -- or validating a POP3 query.
@@ -52,6 +54,7 @@ data QueryErr
   | Empty                   -- ^ Empty query (contains only CRLF)
   | Unknown                 -- ^ Unknown query command
   | Malformed               -- ^ Malformed query (invalid argument number or format)
+  deriving Eq
 
 instance Show QueryErr where
   show = \case
@@ -110,6 +113,7 @@ parsers =
   , ("UIDL", parseOptMsgNo Uidl)
   , ("RETR", parseMsgNo    Retr)
   , ("DELE", parseMsgNo    Dele)
+  , ("CAPA", parseVoid     Capa)
   , ("STAT", parseVoid     Stat)
   , ("NOOP", parseVoid     Noop)
   , ("RSET", parseVoid     Rset)

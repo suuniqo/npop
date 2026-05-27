@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {- |
 Module      : Session
@@ -16,6 +17,8 @@ module Session
   ( -- * Replies
     SessionErr (..)
   , Reply (..)
+  , CapaEntry (..)
+  , CapaReply (..)
   , PassReply (..)
   , StatReply (..)
   , ListEntry (..)
@@ -156,6 +159,19 @@ msgDelete num maildrop =
 
 -- Replies --------------------------------------------------------------
 
+-- | Encodes the authentication
+-- capabilities of the POP3 server.
+data CapaEntry
+  = CapUser
+
+instance Show CapaEntry where
+  show = \case
+    CapUser -> "USER"
+
+-- | Encodes a successful reply to the CAPA command.
+newtype CapaReply = CapaReply { capaList :: [CapaEntry] }
+  deriving Show
+
 -- | Encodes a successful reply to the PASS command.
 data PassReply = PassReply
   { passUser  :: Username   -- ^ Associated username
@@ -242,6 +258,7 @@ data Reply
   = RepHelo             -- ^ Initial greeting
   | RepUser             -- ^ USER command reply
   | RepPass PassReply   -- ^ PASS command reply
+  | RepCapa CapaReply   -- ^ CAPA command reply
   | RepStat StatReply   -- ^ STAT command reply
   | RepList ListReply   -- ^ LIST command reply
   | RepRetr RetrReply   -- ^ RETR command reply
@@ -387,6 +404,13 @@ processPass phase@(AuthPhase maybeUser) pass = case maybeUser of
   Nothing   -> Stay phase (RepErr UserFirst)
   Just user -> Next (VerifPhase user pass)
 
+-- | Handles the CAPA command.
+--
+-- Currently only password authentication is
+-- supported so the only capability
+processCapa :: Phase Auth -> Transition Auth
+processCapa phase = Stay phase (RepCapa $ CapaReply [CapUser])
+
 -- | Handles the QUIT command, given a @Phase Auth@. 
 --
 -- Quitting is always successful during the AUTHENTICATION
@@ -404,6 +428,7 @@ instance ProcessQuery Auth where
   processQuery' phase = \case
     User name -> processUser phase name                 -- Handles USER command
     Pass pass -> processPass phase pass                 -- Handles PASS command
+    Capa      -> processCapa phase                      -- Handles CAPA command
     Quit      -> processQuitAuth phase                  -- Handles QUIT command
     _         -> Stay phase (RepErr InvalidPhase)       -- No other command is permitted
 
