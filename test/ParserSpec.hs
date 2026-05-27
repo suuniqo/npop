@@ -250,7 +250,7 @@ prop_queryLengthLimit = do
 -- | Executes and validates all
 -- defined hedgehog properties.
 spec :: Spec
-spec = describe "Query Parser" $ do
+spec = describe "Parser" $ do
 
   describe "valid queries" $ do
     it "roundtrip: render then parse gives same query" $
