@@ -2,8 +2,6 @@
 
 A small but robust **POP3 server** written in Haskell, with Maildir-based storage and virtual users.
 
-![session example](.github/assets/cover.png)
-
 ## Table of Contents
 - [Features](#features)
 - [How to use](#how-to-use)
