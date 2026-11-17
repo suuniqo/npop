@@ -46,9 +46,9 @@ npop: ThreadId 1: fail: failed to build shadow: /var/npop/shadow: openFile: does
 sudo npop
 ```
 
-The server listens on the POP3 port (110) by default and starts accepting connections immediately. It can be stopped with `Ctrl-C`. Root privileges are needed to bind port 110 and to read the restricted `shadow` file.
+The server listens on the POP3 port (110) by default and starts accepting connections immediately. It can be stopped with `Ctrl-C`. Root privileges are needed to bind port 110 and to read the `shadow` file.
 
-For long-running deployments, using process manager such as `systemd` is recommended.
+For long-running deployments, using a process manager such as `systemd` is recommended.
 
 ### Configuration
 
@@ -71,7 +71,7 @@ pass_name      = "shadow"       # file containing user credentials
 
 ### Managing users and mail
 
-The `npop-tools` script handles users and messages:
+The `npop-tools` helper script handles users and messages:
 
 | Command | Description |
 |---|---|
@@ -80,6 +80,7 @@ The `npop-tools` script handles users and messages:
 | `npop-tools put <user>` | Deliver a message to the user's mailbox (end input with `Ctrl-D`) |
 
 
+For example:
 ```bash
 $ sudo npop-tools add alice
 password:
@@ -125,7 +126,7 @@ cabal build
 cabal install
 ```
 
-This installs the `npop` and `npop-tools` executables. If they aren't found afterwards, add cabal's bin directory to your `PATH` (e.g. in `.bashrc`):
+This installs the `npop` and `npop-tools` executables. If they aren't found afterwards, add cabal's bin directory to your `PATH`:
 
 ```bash
 export PATH="$HOME/.cabal/bin:$PATH"
