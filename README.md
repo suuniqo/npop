@@ -1,6 +1,6 @@
 # nano-pop
 
-A small but robust **POP3 server** written in Haskell, with Maildir-based storage and virtual users.
+A simple but robust **POP3 server** written in Haskell, with Maildir-based storage and virtual users.
 
 ## Table of Contents
 - [Features](#features)
